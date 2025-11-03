@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+unsloth_compiled_cache/
+wandb/
+prepared_data/
+outputs/
+lora_model/
+benchmark_results/
+*-checkpoint/
+*.log
+*.safetensors
+whisper-large-v3-turbo-lora-pl-med-asr-45s
+lion-ai/
