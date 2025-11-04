@@ -1,5 +1,5 @@
 import torch
-from datasets import load_dataset, Audio
+from datasets import load_dataset, Audio, load_from_disk
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 import json
 import os
@@ -12,9 +12,9 @@ import evaluate
 # --- Configuration ---
 # Replace with your Hugging Face dataset name
 DATASET_NAME = "prepared_data"
-DATSET_SPLIT = "test"
+DATASET_SPLIT = "test"
 # Replace with the desired Whisper model name
-MODEL_NAME = "whisper-large-v3-turbo-lora-pl-med-asr-45s"
+MODEL_NAME = "openai/whisper-small"
 # The name of the audio column in your dataset
 AUDIO_COLUMN_NAME = "path"
 # The name of the text column in your dataset
@@ -180,7 +180,7 @@ def main():
     # --- 1. Load Dataset ---
     print("Loading dataset...")
     try:
-        dataset = load_dataset(DATASET_NAME, split="test", trust_remote_code=True)
+        dataset = load_from_disk(DATASET_NAME)[DATASET_SPLIT]
         print(f"Dataset loaded successfully: {len(dataset)} samples")
     except Exception as e:
         print(f"Failed to load dataset '{DATASET_NAME}'. Error: {e}")
@@ -192,8 +192,8 @@ def main():
     # --- 2. Load Model and Processor ---
     print(f"Loading model and processor: {MODEL_NAME}")
     try:
-        processor = WhisperProcessor.from_pretrained(MODEL_NAME)
-        model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME, task="transcribe")
+        model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME)
+        processor = WhisperProcessor.from_pretrained("openai/whisper-small", language="Polish", task="transcribe")
         model.to(DEVICE)
         print(f"Model loaded successfully on {DEVICE}")
     except Exception as e:

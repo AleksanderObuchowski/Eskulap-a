@@ -1,7 +1,7 @@
 from datasets import load_dataset, Audio, concatenate_datasets
 
 
-MAX_DURATION_SECONDS = 45.0
+MAX_DURATION_SECONDS = 30.0
 
 
 def filter_by_duration(example):
