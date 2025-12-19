@@ -1,142 +1,97 @@
-from unsloth import FastModel
-from transformers import WhisperForConditionalGeneration
-import torch
-from datasets import load_dataset, Audio, concatenate_datasets
-from transformers import Seq2SeqTrainingArguments, Seq2SeqTrainer
-from unsloth import is_bf16_supported
-import wandb
-
-MODEL_NAME = "whisper-large-v3-turbo-lora-pl-med-asr-45s"
-
-model, tokenizer = FastModel.from_pretrained(
-    model_name = "unsloth/whisper-large-v3-turbo",
-    dtype = None, # Leave as None for auto detection
-    load_in_4bit = False, # Set to True to do 4bit quantization which reduces memory
-    auto_model = WhisperForConditionalGeneration,
-    whisper_language = "Polish",
-    whisper_task = "transcribe",
-    # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-)
-
-model = FastModel.get_peft_model(
-    model,
-    r = 64, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-    target_modules = ["q_proj", "v_proj"],
-    lora_alpha = 64,
-    lora_dropout = 0, # Supports any, but = 0 is optimized
-    bias = "none",    # Supports any, but = "none" is optimized
-    # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-    use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-    random_state = 3407,
-    use_rslora = False,  # We support rank stabilized LoRA
-    loftq_config = None, # And LoftQ
-    task_type = None, # ** MUST set this for Whisper **
-)
-
-import numpy as np
-import tqdm
-import random
-
-
-
-def filter_by_duration(example):
-    try:
-        audio = example["path"]
-        array = audio["array"]
-        sampling_rate = audio["sampling_rate"]
-    except (KeyError, TypeError):
-        return False
-    if array is None or sampling_rate is None or sampling_rate <= 0:
-        return False
-    duration_seconds = len(array) / sampling_rate
-    return duration_seconds < MAX_DURATION_SECONDS
-
-#Set this to the language you want to train on
-model.generation_config.language = "<|pl|>"
-model.generation_config.task = "transcribe"
-model.generation_config.forced_decoder_ids = processor.get_decoder_prompt_ids(
-    language="pl", task="transcribe"
-)
-from transformers import WhisperConfig
-default_cfg = WhisperConfig.from_pretrained("unsloth/whisper-large-v3-turbo")
-model.generation_config.suppress_tokens = default_cfg.suppress_tokens
-model.generation_config.begin_suppress_tokens = default_cfg.begin_suppress_tokens
-
-def formatting_prompts_func(example):
-    try:
-        audio_arrays = example['path']['array']
-        sampling_rate = example["path"]["sampling_rate"]
-        features = tokenizer.feature_extractor(
-            audio_arrays, sampling_rate=sampling_rate
-        )
-        tokenized_text = tokenizer.tokenizer(example["text"])
-        return {
-            "input_features": features.input_features[0],
-            "labels": tokenized_text.input_ids,
-        }
-    except Exception as e:
-        return {
-            "input_features": None,
-            "labels": None,
-        }
-dataset = load_dataset("prepared_data")
-
-train_dataset =  [formatting_prompts_func(example) for example in tqdm.tqdm(dataset['train'], desc="Processing train dataset")]
-test_dataset =  [formatting_prompts_func(example) for example in tqdm.tqdm(dataset['test'], desc="Processing test dataset")]
-
-# @title Create compute_metrics and datacollator
-import evaluate
-import torch
-
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
-import pdb
 
-metric = evaluate.load("wer")
+import evaluate
+import torch
+import wandb
+from datasets import Audio, load_from_disk
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, WhisperForConditionalGeneration
+from unsloth import FastModel, is_bf16_supported
+
+# Configuration
+BASE_MODEL_NAME = "unsloth/whisper-large-v3-turbo"
+USE_4BIT = False
+BATCH_SIZE = 16
+LEARNING_RATE = 1e-5
+NUM_TRAIN_EPOCHS = 2
+
+# Setup
+RUN_NAME = "whisper-large-v3-turbo-lora-pl-med-asr"
+
+# Processed data cache path
+PROCESSED_DATA_PATH = f"processed_data_{BASE_MODEL_NAME.split('/')[-1]}"
+
+# Load model and tokenizer with Unsloth
+model, tokenizer = FastModel.from_pretrained(
+    model_name=BASE_MODEL_NAME,
+    dtype=None,
+    load_in_4bit=USE_4BIT,
+    auto_model=WhisperForConditionalGeneration,
+    whisper_language="Polish",
+    whisper_task="transcribe",
+)
+
+# Apply LoRA with Unsloth
+model = FastModel.get_peft_model(
+    model,
+    r=64,
+    target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
+    lora_alpha=64,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+    random_state=3407,
+    use_rslora=False,
+    loftq_config=None,
+    task_type="SEQ_2_SEQ_LM",
+)
+
+# Configure generation settings
+model.generation_config.language = "<|pl|>"
+model.generation_config.task = "transcribe"
+model.generation_config.forced_decoder_ids = tokenizer.get_decoder_prompt_ids(
+    language="pl", task="transcribe"
+)
+
+# Load or process dataset with caching
+if os.path.exists(PROCESSED_DATA_PATH):
+    print(f"Loading cached processed dataset from {PROCESSED_DATA_PATH}")
+    dataset = load_from_disk(PROCESSED_DATA_PATH)
+else:
+    print("Processing dataset (this will be cached for future runs)...")
+    dataset = load_from_disk("prepared_data")
+    dataset = dataset.cast_column("path", Audio(sampling_rate=16000))
+
+    def prepare_dataset(batch):
+        audio = batch["path"]
+        features = tokenizer.feature_extractor(
+            audio["array"], sampling_rate=audio["sampling_rate"]
+        )
+        batch["input_features"] = features.input_features[0]
+        batch["labels"] = tokenizer.tokenizer(batch["text"]).input_ids
+        return batch
+
+    dataset = dataset.map(
+        prepare_dataset, remove_columns=dataset.column_names["train"], num_proc=32
+    )
+    dataset.save_to_disk(PROCESSED_DATA_PATH)
+    print(f"Processed dataset saved to {PROCESSED_DATA_PATH}")
+
+# Metrics computation
+wer_metric = evaluate.load("wer")
+
+
 def compute_metrics(pred):
-    # When predict_with_generate=True, predictions are already token IDs
     pred_ids = pred.predictions
     label_ids = pred.label_ids
-    
-    # Replace -100 with the pad_token_id
+
     label_ids[label_ids == -100] = tokenizer.pad_token_id
-    
-    # Decode predictions and labels
+
     pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-    
-    # Calculate overall WER
-    wer = 100 * metric.compute(predictions=pred_str, references=label_str)
-    
-    # Log random samples with predictions
-    num_samples_to_log = min(10, len(pred_str))
-    if num_samples_to_log > 0:
-        # Get random indices
-        sample_indices = random.sample(range(len(pred_str)), num_samples_to_log)
-        
-        # Create a table for WandB
-        sample_data = []
-        for idx in sample_indices:
-            # Calculate WER for individual sample
-            sample_wer = 100 * metric.compute(
-                predictions=[pred_str[idx]],
-                references=[label_str[idx]]
-            )
-            sample_data.append([
-                idx,
-                label_str[idx],
-                pred_str[idx],
-                round(sample_wer, 2)
-            ])
-        
-        # Log to WandB as a table
-        wandb.log({
-            "sample_predictions": wandb.Table(
-                columns=["Sample Index", "Reference", "Prediction", "WER (%)"],
-                data=sample_data
-            )
-        })
-    
+
+    wer = 100 * wer_metric.compute(predictions=pred_str, references=label_str)
     return {"wer": wer}
 
 
@@ -144,83 +99,103 @@ def compute_metrics(pred):
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
 
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-
-        input_features = [{"input_features": feature["input_features"]} for feature in features]
+    def __call__(
+        self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
+        input_features = [
+            {"input_features": feature["input_features"]} for feature in features
+        ]
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
 
         label_features = [{"input_ids": feature["labels"]} for feature in features]
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
 
-        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+        labels = labels_batch["input_ids"].masked_fill(
+            labels_batch.attention_mask.ne(1), -100
+        )
 
         if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
             labels = labels[:, 1:]
 
         batch["labels"] = labels
-
         return batch
 
-wandb.init(project="eskulap-a")  # Initialize WandB
 
+# Initialize data collator
+data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=tokenizer)
+
+# Calculate training steps
+num_batches = len(dataset["train"]) // BATCH_SIZE
+
+# Initialize WandB
+wandb.init(project="eskulap-a")
+
+# Training configuration
+training_args = Seq2SeqTrainingArguments(
+    output_dir=f"./models/{RUN_NAME}",
+    run_name=RUN_NAME,
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
+    learning_rate=LEARNING_RATE,
+    gradient_accumulation_steps=1,
+    warmup_ratio=0.1,
+    num_train_epochs=NUM_TRAIN_EPOCHS,
+    fp16=not is_bf16_supported(),
+    bf16=is_bf16_supported(),
+    optim="adamw_8bit",
+    weight_decay=0.01,
+    lr_scheduler_type="linear",
+    eval_strategy="steps",
+    predict_with_generate=True,
+    generation_max_length=225,
+    generation_num_beams=1,
+    save_steps=int(num_batches * 0.5),
+    eval_steps=int(num_batches * 0.5),
+    logging_steps=int(num_batches * 0.1) or 1,
+    save_total_limit=5,
+    report_to=["wandb"],
+    load_best_model_at_end=True,
+    metric_for_best_model="wer",
+    greater_is_better=False,
+    remove_unused_columns=False,
+    label_names=["labels"],
+    seed=3407,
+)
+
+# Initialize trainer
 trainer = Seq2SeqTrainer(
-    model = model,
-    train_dataset = train_dataset,
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=tokenizer),
-    eval_dataset = test_dataset,
-    tokenizer = tokenizer.feature_extractor,
+    model=model,
+    args=training_args,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
+    data_collator=data_collator,
     compute_metrics=compute_metrics,
-    args = Seq2SeqTrainingArguments(
-        predict_with_generate=True,
-        per_device_train_batch_size = 16,
-        per_device_eval_batch_size = 16,
-        gradient_accumulation_steps = 1,
-        warmup_ratio=0.1,
-        num_train_epochs = 2, # Set this for 1 full training run.
-        # max_steps = 120,
-        learning_rate = 1e-5,
-        logging_steps = 1,
-        optim = "adamw_8bit",
-        fp16 = not is_bf16_supported(),  # Use fp16 if bf16 is not supported
-        bf16 = is_bf16_supported(),  # Use bf16 if supported
-        weight_decay = 0.01,
-        remove_unused_columns=False,  # required as the PeftModel forward doesn't have the signature of the wrapped model's forward
-        lr_scheduler_type = "linear",
-        label_names = ['labels'],
-        eval_steps = 50,
-        eval_strategy="steps",
-        seed = 3407,
-        output_dir = "outputs",
-        report_to = "wandb", # Use TrackIO/WandB etc
-        run_name = MODEL_NAME,
-        load_best_model_at_end = True,
-        metric_for_best_model="wer",
-        generation_max_length=225,          # typical for Whisper
-        generation_num_beams=1,
-    ),
-)# @title Show current memory stats
+    tokenizer=tokenizer.feature_extractor,
+)
+
+# Show memory stats
 gpu_stats = torch.cuda.get_device_properties(0)
 start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
 max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 print(f"GPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
 print(f"{start_gpu_memory} GB of memory reserved.")
 
+# Train
 trainer_stats = trainer.train()
 
-# @title Show final memory and time stats
+# Show final memory and time stats
 used_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
 used_memory_for_lora = round(used_memory - start_gpu_memory, 3)
 used_percentage = round(used_memory / max_memory * 100, 3)
 lora_percentage = round(used_memory_for_lora / max_memory * 100, 3)
 print(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
-print(
-    f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training."
-)
+print(f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training.")
 print(f"Peak reserved memory = {used_memory} GB.")
 print(f"Peak reserved memory for training = {used_memory_for_lora} GB.")
 print(f"Peak reserved memory % of max memory = {used_percentage} %.")
 print(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
 
-model.save_pretrained(MODEL_NAME)  # Local saving
-tokenizer.save_pretrained(MODEL_NAME)
-model.push_to_hub_merged(f"lion-ai/{MODEL_NAME}", tokenizer, save_method = "merged_16bit")  # Push LoRA merged model to hub
+# Save model
+model.save_pretrained(RUN_NAME)
+tokenizer.save_pretrained(RUN_NAME)
+model.push_to_hub_merged(f"lion-ai/{RUN_NAME}", tokenizer, save_method="merged_16bit")
