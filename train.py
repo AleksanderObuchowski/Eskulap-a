@@ -1,11 +1,16 @@
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 
 import evaluate
 import torch
-import wandb
-from datasets import Audio, load_from_disk
+from datasets import load_from_disk
 from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -15,20 +20,25 @@ from transformers import (
     WhisperTokenizer,
 )
 
+import wandb
+from data.config import prepared_data_dir, processed_data_dir
+
 # Configuration
 BASE_MODEL_NAME = "openai/whisper-large-v3"
 USE_LORA = True
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-5
-NUM_TRAIN_EPOCHS = 3
+BATCH_SIZE = 16
+LEARNING_RATE = 1e-4
+NUM_TRAIN_EPOCHS = 10
 
-# Setup
+# Setups
 RUN_NAME = BASE_MODEL_NAME.split("/")[-1] + "-med-pl"
 if USE_LORA:
     RUN_NAME += "-lora"
 
 # Processed data cache path (includes model name to handle different feature extractors)
-PROCESSED_DATA_PATH = f"processed_data_{BASE_MODEL_NAME.split('/')[-1]}"
+PROCESSED_DATA_PATH = os.path.join(
+    processed_data_dir, f"processed_data_{BASE_MODEL_NAME.split('/')[-1]}"
+)
 
 # Load tokenizer/processor (needed for both loading and processing)
 tokenizer = WhisperTokenizer.from_pretrained(
@@ -47,19 +57,23 @@ if os.path.exists(PROCESSED_DATA_PATH):
     dataset = load_from_disk(PROCESSED_DATA_PATH)
 else:
     print("Processing dataset (this will be cached for future runs)...")
-    dataset = load_from_disk("prepared_data")
-    dataset = dataset.cast_column("path", Audio(sampling_rate=16000))
+    dataset = load_from_disk(prepared_data_dir)
 
     def prepare_dataset(batch):
-        audio = batch["path"]
+        audio_arrays = [a["array"] for a in batch["audio"]]
+
         batch["input_features"] = feature_extractor(
-            audio["array"], sampling_rate=audio["sampling_rate"]
-        ).input_features[0]
+            audio_arrays, sampling_rate=16000
+        ).input_features
         batch["labels"] = tokenizer(batch["text"]).input_ids
         return batch
 
     dataset = dataset.map(
-        prepare_dataset, remove_columns=dataset.column_names["train"], num_proc=32
+        prepare_dataset,
+        remove_columns=dataset.column_names["train"],
+        batched=True,
+        batch_size=50,
+        num_proc=8,
     )
     dataset.save_to_disk(PROCESSED_DATA_PATH)
     print(f"Processed dataset saved to {PROCESSED_DATA_PATH}")
@@ -75,12 +89,12 @@ if USE_LORA:
     from peft import LoraConfig, TaskType, get_peft_model
 
     lora_config = LoraConfig(
-        r=64,
+        r=64,s
         lora_alpha=64,
-        target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
-        lora_dropout=0,
+        target_modules=["q_proj", "v_proj", "k_proj", "out_proj", "fc1", "fc2"],
+        lora_dropout=0.05,
         bias="none",
-        task_type=TaskType.SEQ_2_SEQ_LM,
+        task_type=None,
     )
     model = get_peft_model(model, lora_config)
     model.enable_input_require_grads()  # Required for LoRA + gradient checkpointing
@@ -127,6 +141,7 @@ data_collator = DataCollatorSpeechSeq2SeqWithPadding(
 
 # Metrics computation
 wer_metric = evaluate.load("wer")
+cer_metric = evaluate.load("cer")
 
 
 def compute_metrics(pred):
@@ -141,14 +156,38 @@ def compute_metrics(pred):
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
     wer = 100 * wer_metric.compute(predictions=pred_str, references=label_str)
-    return {"wer": wer}
+    cer = 100 * cer_metric.compute(predictions=pred_str, references=label_str)
+
+    # Log 50 random examples to wandb
+    num_examples = min(50, len(pred_str))
+    indices = random.sample(range(len(pred_str)), num_examples)
+    examples_table = wandb.Table(columns=["Reference", "Prediction"])
+    for idx in indices:
+        examples_table.add_data(label_str[idx], pred_str[idx])
+    wandb.log({"eval_examples": examples_table})
+
+    return {"wer": wer, "cer": cer}
 
 
 # Calculate training steps
 num_batches = len(dataset["train"]) // BATCH_SIZE
 
-# Initialize WandB
-wandb.init(project="eskulap-a")
+# Initialize WandB with training config
+wandb_config = {
+    "base_model": BASE_MODEL_NAME,
+    "use_lora": USE_LORA,
+    "batch_size": BATCH_SIZE,
+    "learning_rate": LEARNING_RATE,
+    "num_train_epochs": NUM_TRAIN_EPOCHS,
+}
+if USE_LORA:
+    wandb_config["lora_r"] = lora_config.r
+    wandb_config["lora_alpha"] = lora_config.lora_alpha
+    wandb_config["lora_dropout"] = lora_config.lora_dropout
+    wandb_config["lora_target_modules"] = lora_config.target_modules
+    wandb_config["lora_bias"] = lora_config.bias
+
+wandb.init(project="eskulap-a", config=wandb_config)
 
 # Training configuration
 training_args = Seq2SeqTrainingArguments(
@@ -179,7 +218,9 @@ training_args = Seq2SeqTrainingArguments(
     remove_unused_columns=False,  # Prevent trainer from removing input_features
 )
 
-# Initialize trainer
+
+# Initialize logging callback (removed - examples now logged in compute_metrics)
+
 trainer = Seq2SeqTrainer(
     args=training_args,
     model=model,
@@ -191,6 +232,13 @@ trainer = Seq2SeqTrainer(
 )
 
 # Train and push to hub
+
+# Calculate baseline metrics before training
+print("Calculating baseline metrics...")
+baseline_metrics = trainer.evaluate()
+print(f"Baseline metrics: {baseline_metrics}")
+wandb.log({"baseline": baseline_metrics})
+
 trainer.train()
 
 model_card_kwargs = {

@@ -21,3 +21,4 @@ whisper-large-v3-turbo-lora-pl-med-asr-45s
 lion-ai/
 processed_data_*
 models
+.env

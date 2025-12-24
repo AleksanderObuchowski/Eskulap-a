@@ -1,22 +1,23 @@
-import torch
-from datasets import load_dataset, Audio, load_from_disk
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Any
-import pandas as pd
-from tqdm import tqdm
+from typing import Any, Dict, List
+
 import evaluate
+import pandas as pd
+import torch
+from datasets import Audio, load_dataset, load_from_disk
+from tqdm import tqdm
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 # --- Configuration ---
 # Replace with your Hugging Face dataset name
-DATASET_NAME = "prepared_data"
+DATASET_NAME = "/mnt/data/Eskulap-a/data"
 DATASET_SPLIT = "test"
 # Replace with the desired Whisper model name
-MODEL_NAME = "openai/whisper-small"
+MODEL_NAME = "AleksanderObuchowski/whisper-large-v3-turbo-med-pl-lora"
 # The name of the audio column in your dataset
-AUDIO_COLUMN_NAME = "path"
+AUDIO_COLUMN_NAME = "audio"
 # The name of the text column in your dataset
 TEXT_COLUMN_NAME = "text"
 # The language of the audio data (if known, otherwise it will be detected)
@@ -29,11 +30,13 @@ RESULTS_DIR = "benchmark_results"
 # Leaderboard file
 LEADERBOARD_FILE = "leaderboard.json"
 
+
 def create_results_directory():
     """Create results directory if it doesn't exist."""
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
         print(f"Created results directory: {RESULTS_DIR}")
+
 
 def process_batch(model, processor, audio_batch: List[Dict], device: str) -> List[str]:
     """
@@ -53,13 +56,13 @@ def process_batch(model, processor, audio_batch: List[Dict], device: str) -> Lis
     sampling_rates = [item["sampling_rate"] for item in audio_batch]
 
     # Ensure all samples have the same sampling rate
-    assert all(sr == sampling_rates[0] for sr in sampling_rates), "All audio samples must have the same sampling rate"
+    assert all(
+        sr == sampling_rates[0] for sr in sampling_rates
+    ), "All audio samples must have the same sampling rate"
 
     # Process all audio samples in the batch
     input_features = processor(
-        audio_arrays,
-        sampling_rate=sampling_rates[0],
-        return_tensors="pt"
+        audio_arrays, sampling_rate=sampling_rates[0], return_tensors="pt"
     ).input_features
 
     input_features = input_features.to(device)
@@ -72,6 +75,7 @@ def process_batch(model, processor, audio_batch: List[Dict], device: str) -> Lis
     transcriptions = processor.batch_decode(predicted_ids, skip_special_tokens=True)
 
     return transcriptions
+
 
 def save_detailed_results(results: Dict[str, Any], model_name: str) -> str:
     """
@@ -89,11 +93,12 @@ def save_detailed_results(results: Dict[str, Any], model_name: str) -> str:
     filename = f"{safe_model_name}_{timestamp}.json"
     filepath = os.path.join(RESULTS_DIR, filename)
 
-    with open(filepath, 'w', encoding='utf-8') as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     print(f"Detailed results saved to: {filepath}")
     return filepath
+
 
 def update_leaderboard(results: Dict[str, Any]) -> None:
     """
@@ -106,7 +111,7 @@ def update_leaderboard(results: Dict[str, Any]) -> None:
 
     # Load existing leaderboard or create new one
     if os.path.exists(leaderboard_path):
-        with open(leaderboard_path, 'r', encoding='utf-8') as f:
+        with open(leaderboard_path, "r", encoding="utf-8") as f:
             leaderboard = json.load(f)
     else:
         leaderboard = []
@@ -122,7 +127,7 @@ def update_leaderboard(results: Dict[str, Any]) -> None:
         "batch_size": results["batch_size"],
         "device": results["device"],
         "language": results["language"],
-        "detailed_results_file": results["detailed_results_file"]
+        "detailed_results_file": results["detailed_results_file"],
     }
 
     # Add to leaderboard
@@ -132,10 +137,11 @@ def update_leaderboard(results: Dict[str, Any]) -> None:
     leaderboard.sort(key=lambda x: x["wer"])
 
     # Save updated leaderboard
-    with open(leaderboard_path, 'w', encoding='utf-8') as f:
+    with open(leaderboard_path, "w", encoding="utf-8") as f:
         json.dump(leaderboard, f, indent=2, ensure_ascii=False)
 
     print(f"Leaderboard updated: {leaderboard_path}")
+
 
 def display_leaderboard(top_n: int = 10) -> None:
     """
@@ -150,7 +156,7 @@ def display_leaderboard(top_n: int = 10) -> None:
         print("No leaderboard found. Run some benchmarks first!")
         return
 
-    with open(leaderboard_path, 'r', encoding='utf-8') as f:
+    with open(leaderboard_path, "r", encoding="utf-8") as f:
         leaderboard = json.load(f)
 
     if not leaderboard:
@@ -160,15 +166,24 @@ def display_leaderboard(top_n: int = 10) -> None:
     print(f"\n{'='*80}")
     print(f"{'ASR MODEL LEADERBOARD':^80}")
     print(f"{'='*80}")
-    print(f"{'Rank':<5} {'Model':<30} {'WER':<8} {'CER':<8} {'Samples':<8} {'Date':<12}")
+    print(
+        f"{'Rank':<5} {'Model':<30} {'WER':<8} {'CER':<8} {'Samples':<8} {'Date':<12}"
+    )
     print(f"{'-'*80}")
 
     for i, entry in enumerate(leaderboard[:top_n], 1):
         timestamp = datetime.fromisoformat(entry["timestamp"]).strftime("%Y-%m-%d")
-        model_short = entry["model_name"][:28] + "..." if len(entry["model_name"]) > 30 else entry["model_name"]
-        print(f"{i:<5} {model_short:<30} {entry['wer']:<8.4f} {entry['cer']:<8.4f} {entry['num_samples']:<8} {timestamp:<12}")
+        model_short = (
+            entry["model_name"][:28] + "..."
+            if len(entry["model_name"]) > 30
+            else entry["model_name"]
+        )
+        print(
+            f"{i:<5} {model_short:<30} {entry['wer']:<8.4f} {entry['cer']:<8.4f} {entry['num_samples']:<8} {timestamp:<12}"
+        )
 
     print(f"{'='*80}\n")
+
 
 def main():
     """
@@ -193,7 +208,9 @@ def main():
     print(f"Loading model and processor: {MODEL_NAME}")
     try:
         model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME)
-        processor = WhisperProcessor.from_pretrained("openai/whisper-small", language="Polish", task="transcribe")
+        processor = WhisperProcessor.from_pretrained(
+            "openai/whisper-large-v3-turbo", language="Polish", task="transcribe"
+        )
         model.to(DEVICE)
         print(f"Model loaded successfully on {DEVICE}")
     except Exception as e:
@@ -224,7 +241,7 @@ def main():
                 batch_predictions = process_batch(model, processor, audio_batch, DEVICE)
 
                 # Collect results
-                predictions.extend(batch_predictions)
+                predictions.extend([p.strip() for p in batch_predictions])
                 references.extend(batch_references)
 
                 pbar.update(len(batch_items))
@@ -248,11 +265,15 @@ def main():
 
     # Calculate WER (Word Error Rate) using evaluate library
     wer_metric = evaluate.load("wer")
-    wer_score = wer_metric.compute(references=valid_references, predictions=valid_predictions)
+    wer_score = wer_metric.compute(
+        references=valid_references, predictions=valid_predictions
+    )
 
     # Calculate CER (Character Error Rate) using evaluate library
     cer_metric = evaluate.load("cer")
-    cer_score = cer_metric.compute(references=valid_references, predictions=valid_predictions)
+    cer_score = cer_metric.compute(
+        references=valid_references, predictions=valid_predictions
+    )
 
     # --- 5. Prepare Results ---
     timestamp = datetime.now().isoformat()
@@ -271,13 +292,9 @@ def main():
         "predictions": predictions,
         "references": references,
         "examples": [
-            {
-                "reference": references[i],
-                "prediction": predictions[i],
-                "sample_idx": i
-            }
+            {"reference": references[i], "prediction": predictions[i], "sample_idx": i}
             for i in range(min(10, len(predictions)))
-        ]
+        ],
     }
 
     # --- 6. Save Results ---
@@ -288,9 +305,9 @@ def main():
     update_leaderboard(results)
 
     # --- 7. Display Results ---
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("BENCHMARK RESULTS")
-    print("="*60)
+    print("=" * 60)
     print(f"Dataset: {DATASET_NAME}")
     print(f"Model: {MODEL_NAME}")
     print(f"Language: {LANGUAGE}")
@@ -301,7 +318,7 @@ def main():
     print(f"Word Error Rate (WER): {wer_score:.4f}")
     print(f"Character Error Rate (CER): {cer_score:.4f}")
     print(f"Timestamp: {timestamp}")
-    print("="*60)
+    print("=" * 60)
 
     # Show some examples
     print("\nExample Transcriptions:")
@@ -314,6 +331,7 @@ def main():
 
     # Display current leaderboard
     display_leaderboard()
+
 
 if __name__ == "__main__":
     main()
