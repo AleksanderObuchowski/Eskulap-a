@@ -9,16 +9,34 @@ dependencies = [
     "evaluate>=0.4.6",
     "jiwer>=4.0.0",
     "levenshtein>=0.27.3",
-    "librosa>=0.11.0",
+    # "librosa>=0.11.0",
     "python-dotenv>=1.2.1",
+    # NOTE: qwen-asr must be installed separately with: pip install qwen-asr
     "rich>=13.0.0",
     "setuptools>=80.9.0",
     "torch==2.8",
     "torchcodec==0.7",
-    "transformers==4.51.3",
+    "transformers==4.57.6",
+    "qwen-asr==0.0.6",
+    "accelerate>=1.6.0",
     "trl==0.19.1",
-    "unsloth==2025.10.11",
+    # "unsloth>=2025.10.11",  # commented out due to transformers version conflict with GLM-ASR
     "wand>=0.6.13",
     "wandb>=0.22.3",
     "gradio>=5.0.0",
+    "muon-optimizer",
+    "peft>=0.18.0",
+    "typer>=0.21.1",
+    "datasketch>=1.9.0",
+    "pyyaml>=6.0.3",
+]
+
+[tool.uv.sources]
+muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
+
+# Override librosa to use a version compatible with Python 3.11
+[tool.uv]
+constraint-dependencies = [
+    "librosa>=0.10.0,<0.11",
+    "numba>=0.59.0",
 ]

@@ -1,0 +1,55 @@
+# Experiment configuration for Polish medical ASR
+#
+# Available datasets:
+#   - admed_anoni: Medical reports - SALT anonymized
+#   - admed_human: Medical reports - human recordings
+#   - youtube: YouTube medical content
+#   - gemini: Gemini-generated transcriptions
+#   - bigos: General domain Polish speech
+#
+# Usage:
+#   uv run python train.py --config configs/experiment.yaml
+
+name: "medical_asr_v1"
+
+# Model settings
+model:
+    type: "qwen3-asr"
+    max_duration_seconds: 30.0
+
+# Training datasets
+# Set enabled: false to exclude, or max_samples to limit
+train:
+    admed_anoni:
+        enabled: true
+
+    admed_human:
+        enabled: true
+
+    youtube:
+        enabled: true
+
+    gemini:
+        enabled: true
+
+    bigos:
+        enabled: true
+        max_samples: 10000 # limit general domain data
+
+# Test datasets
+test:
+    admed_anoni:
+        enabled: true
+
+    admed_human:
+        enabled: true
+
+    youtube:
+        enabled: true
+
+    gemini:
+        enabled: true
+
+    bigos:
+        enabled: true
+        max_samples: 1000
