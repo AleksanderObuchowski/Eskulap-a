@@ -1,0 +1,34 @@
+# Training configuration with general domain data (BIGOS)
+# Use this for catastrophic forgetting experiments
+
+name: "medical_with_general_domain"
+
+model:
+  type: "qwen3-asr"
+  max_duration_seconds: 30.0
+
+train_datasets:
+  - name: "admed_anoni"
+  - name: "admed_human"
+  - name: "youtube"
+  - name: "gemini"
+  - name: "bigos"
+    max_samples: 5000  # Configurable amount of general domain data
+
+test_datasets:
+  - name: "admed_anoni"
+  - name: "admed_human"
+  - name: "bigos"
+    max_samples: 1000  # Limit test samples for faster benchmarking
+
+filter_config:
+  min_words: 5
+  deduplicate_text: true
+  max_text_duplicates: 3
+  deduplicate_audio: true
+  max_audio_duplicates: 1
+  use_similarity_filter: true
+  similarity_threshold: 0.75
+  num_perm: 128
+
+# output_paths: uses defaults from .env or /mnt/data/Eskulap-a/{cache,test_sets,data}

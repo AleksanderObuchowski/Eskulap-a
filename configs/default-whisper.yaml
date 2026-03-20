@@ -1,0 +1,43 @@
+# Default training configuration for Polish medical ASR
+# Uses medical domain datasets only
+
+name: "medical_polish_v1"
+
+model:
+    type: "whisper"
+    max_duration_seconds: 30.0
+
+train_datasets:
+    - name: "admed_anoni"
+    - name: "admed_human"
+    - name: "youtube"
+    - name: "gemini"
+    - name: "bigos"
+      max_samples: 5000 # Configurable amount of general domain data
+
+test_datasets:
+    - name: "admed_anoni"
+    - name: "admed_human"
+    - name: "youtube"
+    - name: "gemini"
+    - name: "bigos"
+      max_samples: 1000
+
+filter_config:
+    # Minimum text length (in words) - texts shorter than this are removed
+    min_words: 5
+    # Remove exact text duplicates (same transcription, different audio)
+    deduplicate_text: true
+    # Max copies to keep per unique text (1 = full dedup, 2+ = allow some variation)
+    max_text_duplicates: 8
+    # Remove exact audio duplicates (same audio file used multiple times)
+    deduplicate_audio: true
+    # Max copies to keep per unique audio
+    max_audio_duplicates: 1
+    # Use similarity-based filtering to remove near-duplicate texts
+    use_similarity_filter: true
+    # Jaccard similarity threshold (0-1) - lower = more aggressive filtering
+    similarity_threshold: 0.8
+    # MinHash permutations (higher = more accurate but slower)
+    num_perm: 128
+# output_paths: uses defaults from .env or /mnt/data/Eskulap-a/{cache,test_sets,data}

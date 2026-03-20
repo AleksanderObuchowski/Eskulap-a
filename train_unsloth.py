@@ -1,3 +1,10 @@
+"""Legacy Unsloth Whisper training path.
+
+Deprecated: uses hardcoded ``prepared_data`` instead of ``data.load_train_data`` /
+``configs/experiment.yaml``. Prefer ``train.py`` (Whisper) or align this script with
+the unified pipeline in ``docs/data_pipeline.md`` before relying on it for new work.
+"""
+
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
