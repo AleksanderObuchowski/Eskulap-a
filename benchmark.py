@@ -36,7 +36,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from tqdm import tqdm
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-from whisper_llm_rescore_demo import (
+from eval.llm_rescore import (
     build_hypotheses,
     deduplicate_by_text,
     get_whisper_nbest,

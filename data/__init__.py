@@ -13,7 +13,7 @@ Main API:
     train = load_train_data(config_path="configs/experiment.yaml")
 """
 
-from .experiment_config import DatasetConfig, ExperimentConfig
+from .experiment_config import DatasetConfig, EvaluationConfig, ExperimentConfig
 from .load_data import (
     DATASET_REGISTRY,
     load_single_dataset,
@@ -29,5 +29,6 @@ __all__ = [
     "DATASET_REGISTRY",
     "ExperimentConfig",
     "DatasetConfig",
+    "EvaluationConfig",
     "normalize_text_for_asr",
 ]

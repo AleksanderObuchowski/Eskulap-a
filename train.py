@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Union
 import evaluate
 import numpy as np
 import torch
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForSeq2SeqLM,
@@ -149,11 +149,24 @@ if FREEZE_ENCODER:
 # Data paths
 # =============================================================================
 
+from data.experiment_config import ExperimentConfig
+from data.training_dataset import (
+    compute_training_cache_fingerprint,
+    resolve_processed_data_path,
+)
+
 PROCESSED_DATA_DIR = os.environ.get(
     "PROCESSED_DATA_DIR", "/mnt/data/Eskulap-a/processed_data"
 )
-PROCESSED_DATA_PATH = os.path.join(
-    PROCESSED_DATA_DIR, f"processed_data_{BASE_MODEL_NAME.split('/')[-1]}"
+_experiment_cfg = ExperimentConfig.from_yaml(CONFIG_PATH)
+_training_cache_fp = compute_training_cache_fingerprint(
+    config_path=CONFIG_PATH,
+    model_family=MODEL_TYPE,
+    base_model_name=BASE_MODEL_NAME,
+    inner_dev_from_train=_experiment_cfg.evaluation.inner_dev_from_train,
+)
+PROCESSED_DATA_PATH = resolve_processed_data_path(
+    PROCESSED_DATA_DIR, BASE_MODEL_NAME.split("/")[-1], _training_cache_fp
 )
 
 # =============================================================================
@@ -247,32 +260,26 @@ def prepare_glm_asr_batch(batch):
 # Load or process dataset
 # =============================================================================
 
-# Import the new data loading API
-from data import load_train_data
+from data import load_test_data, load_train_data
+from data.training_dataset import load_or_build_processed_dataset
 
+print(f"Loading data from config: {CONFIG_PATH}")
+raw_train = load_train_data(config_path=CONFIG_PATH)
+print(f"Raw train: {len(raw_train)} samples")
 
-def check_cache_valid():
-    """Check if processed cache is valid."""
-    return os.path.exists(PROCESSED_DATA_PATH)
+inner_dev = _experiment_cfg.evaluation.inner_dev_from_train
+raw_test_dict = None
+if not inner_dev:
+    raw_test_dict = load_test_data(config_path=CONFIG_PATH)
+    if not raw_test_dict:
+        print(
+            "Warning: no enabled test datasets in config; "
+            "falling back to inner_dev_from_train split."
+        )
+        inner_dev = True
 
-
-dataset = None
-if check_cache_valid():
-    print(f"Loading cached dataset from {PROCESSED_DATA_PATH}")
-    dataset = load_from_disk(PROCESSED_DATA_PATH)
-
-if dataset is None:
-    import shutil
-
-    if os.path.exists(PROCESSED_DATA_PATH):
-        shutil.rmtree(PROCESSED_DATA_PATH)
-
-    # Load training data using config
-    print(f"Loading data from config: {CONFIG_PATH}")
-    raw_train = load_train_data(config_path=CONFIG_PATH)
-    print(f"Raw train: {len(raw_train)} samples")
-
-    # Create eval split by unique texts to prevent text leakage between train/dev
+if inner_dev:
+    # Legacy: eval split carved from training concat by unique text
     # (same text can appear multiple times with different audio)
     all_texts = raw_train["text"]
     unique_texts = list(set(all_texts))
@@ -280,39 +287,30 @@ if dataset is None:
     random.shuffle(unique_texts)
     dev_text_count = max(1, min(500, len(unique_texts) // 10))
     dev_texts = set(unique_texts[:dev_text_count])
-
     dev_indices = [i for i, t in enumerate(all_texts) if t in dev_texts]
     train_indices = [i for i, t in enumerate(all_texts) if t not in dev_texts]
-
-    split = DatasetDict({
+    raw_splits = DatasetDict({
         "train": raw_train.select(train_indices),
         "test": raw_train.select(dev_indices),
     })
+else:
+    raw_test = concatenate_datasets(list(raw_test_dict.values()))
+    print(f"Raw test (held-out from config): {len(raw_test)} samples")
+    raw_splits = DatasetDict({"train": raw_train, "test": raw_test})
 
-    # Select prepare function based on model type
-    prepare_fn = (
-        prepare_whisper_batch if MODEL_TYPE == "whisper" else prepare_glm_asr_batch
-    )
-
-    # Process both splits
-    train_processed = split["train"].map(
-        prepare_fn,
-        remove_columns=split["train"].column_names,
-        batched=True,
-        batch_size=50,
-        num_proc=8,
-    )
-    test_processed = split["test"].map(
-        prepare_fn,
-        remove_columns=split["test"].column_names,
-        batched=True,
-        batch_size=50,
-        num_proc=8,
-    )
-
-    dataset = DatasetDict({"train": train_processed, "test": test_processed})
-    dataset.save_to_disk(PROCESSED_DATA_PATH)
-    print(f"Processed dataset saved to {PROCESSED_DATA_PATH}")
+prepare_fn = (
+    prepare_whisper_batch if MODEL_TYPE == "whisper" else prepare_glm_asr_batch
+)
+dataset = load_or_build_processed_dataset(
+    processed_data_path=PROCESSED_DATA_PATH,
+    raw_splits=raw_splits,
+    backend="map_batched",
+    prepare_batch=prepare_fn,
+    map_batch_size=50,
+    map_num_proc=8,
+    required_cache_columns=None,
+)
+print(f"Processed dataset at {PROCESSED_DATA_PATH}")
 
 # Filter long audio for GLM-ASR (variable length features)
 if MODEL_TYPE == "glm-asr":

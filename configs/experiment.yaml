@@ -12,6 +12,12 @@
 
 name: "medical_asr_v1"
 
+# Evaluation split for training scripts (tensorized "test" / eval):
+# - inner_dev_from_train: false — use enabled datasets under `test:` (held-out; matches benchmarks)
+# - inner_dev_from_train: true — legacy: carve dev from training concat by unique text
+evaluation:
+    inner_dev_from_train: false
+
 # Model settings
 model:
     type: "qwen3-asr"

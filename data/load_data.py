@@ -35,41 +35,10 @@ load_dotenv()
 
 from datasets import Audio, Dataset, concatenate_datasets, load_dataset, load_from_disk
 
+from .dataset_catalog import build_dataset_registry
+
 # Dataset registry - maps names to HuggingFace paths and local cache names
-DATASET_REGISTRY = {
-    # Admed datasets - have local clean splits with train/test
-    "admed_anoni": {
-        "hf_path": "lion-ai/admed_voice_clean",
-        "hf_config": "anoni",
-        "local_name": "anoni",
-        "description": "Medical reports - SALT anonymized audio",
-    },
-    "admed_human": {
-        "hf_path": "lion-ai/admed_voice_clean",
-        "hf_config": "human",
-        "local_name": "human",
-        "description": "Medical reports - human recordings",
-    },
-    # Other datasets - loaded from local clean splits or HuggingFace
-    "youtube": {
-        "hf_path": "lion-ai/youtube_asr_30",
-        "hf_config": None,
-        "local_name": "youtube",
-        "description": "YouTube medical content",
-    },
-    "gemini": {
-        "hf_path": "lion-ai/pl_med_asr_test2",
-        "hf_config": None,
-        "local_name": "gemini",
-        "description": "Gemini-generated medical transcriptions",
-    },
-    "bigos": {
-        "hf_path": "lion-ai/bigos",
-        "hf_config": None,
-        "local_name": "bigos",
-        "description": "General domain Polish speech (BIGOS)",
-    },
-}
+DATASET_REGISTRY = build_dataset_registry()
 
 # Local cache directory
 LOCAL_CACHE_DIR = Path(

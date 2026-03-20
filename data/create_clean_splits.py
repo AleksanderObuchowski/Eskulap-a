@@ -32,6 +32,7 @@ load_dotenv()
 from datasets import Audio, Dataset, DatasetDict, load_dataset
 from huggingface_hub import HfApi
 
+from .dataset_catalog import SHARED_TEXT_GROUPS, dataset_config_copy
 from .quality_filter import FilterConfig, filter_dataset
 
 # Default paths
@@ -42,63 +43,8 @@ HF_HOME = os.environ.get("HF_HOME", None)
 
 SEED = 42
 
-# Dataset registry with HuggingFace paths and configuration
-DATASET_CONFIGS = {
-    "admed_anoni": {
-        "hf_path": "lion-ai/admed_voice",
-        "hf_split": "anoni",
-        "local_name": "anoni",
-        "needs_quality_filter": True,
-        "has_existing_test": False,
-        "max_train_samples": None,
-        "max_test_samples": 1000,
-    },
-    "admed_human": {
-        "hf_path": "lion-ai/admed_voice",
-        "hf_split": "human",
-        "local_name": "human",
-        "needs_quality_filter": True,
-        "has_existing_test": False,
-        "max_train_samples": None,
-        "max_test_samples": 1000,
-    },
-    "youtube": {
-        "hf_path": "lion-ai/youtube_asr_30",
-        "hf_split": "train",
-        "local_name": "youtube",
-        "text_column": "sentence",
-        "needs_quality_filter": True,
-        "has_existing_test": False,
-        "max_train_samples": None,
-        "max_test_samples": 500,
-    },
-    "gemini": {
-        "hf_path": "lion-ai/pl_med_asr_test2",
-        "hf_split": "train",
-        "local_name": "gemini",
-        "needs_quality_filter": True,
-        "has_existing_test": False,
-        "max_train_samples": None,
-        "max_test_samples": 500,
-        # max_duration_seconds: uses default 30.0s from SplitConfig
-    },
-    "bigos": {
-        "hf_path": "lion-ai/bigos",
-        "hf_split": "train",
-        "hf_test_split": "validation",  # bigos has existing validation split
-        "local_name": "bigos",
-        "text_column": "sentence",
-        "needs_quality_filter": False,  # already clean
-        "has_existing_test": True,
-        "max_train_samples": 10000,
-        "max_test_samples": 800,
-    },
-}
-
-# Datasets that share texts and need joint splitting
-SHARED_TEXT_GROUPS = [
-    ["admed_anoni", "admed_human"],  # These share the same transcriptions
-]
+# Mutable copy; reset fresh in main() so CLI sample limits do not leak between runs
+DATASET_CONFIGS = dataset_config_copy()
 
 
 @dataclass
@@ -703,6 +649,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    global DATASET_CONFIGS
+    DATASET_CONFIGS = dataset_config_copy()
 
     # Parse per-dataset sample limits (format: DATASET=N)
     def parse_sample_limits(limit_args: list[str]) -> dict[str, int]:

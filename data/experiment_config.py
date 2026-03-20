@@ -66,6 +66,15 @@ class ModelConfig:
 
 
 @dataclass
+class EvaluationConfig:
+    """How training scripts build the eval / tensorized 'test' split."""
+
+    # If True: slice a dev set from the training concat by unique text (legacy).
+    # If False (default): use enabled `test:` datasets from config (held-out, aligns with benchmarks).
+    inner_dev_from_train: bool = False
+
+
+@dataclass
 class ExperimentConfig:
     """Complete experiment configuration."""
 
@@ -73,6 +82,7 @@ class ExperimentConfig:
     model: ModelConfig
     train_datasets: dict[str, DatasetConfig]
     test_datasets: dict[str, DatasetConfig]
+    evaluation: EvaluationConfig
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path) -> "ExperimentConfig":
@@ -91,11 +101,13 @@ class ExperimentConfig:
             max_duration_seconds=model_data.get("max_duration_seconds", 30.0),
         )
 
-        # Parse train datasets
+        # Parse train datasets (skip reserved / non-dataset keys)
         train_datasets = {}
         for name, cfg in data.get("train", {}).items():
-            if cfg is None:
-                cfg = {}
+            if name in ("evaluation", "defaults"):
+                continue
+            if not isinstance(cfg, dict):
+                continue
             train_datasets[name] = DatasetConfig(
                 name=name,
                 enabled=cfg.get("enabled", True),
@@ -113,11 +125,17 @@ class ExperimentConfig:
                 max_samples=cfg.get("max_samples"),
             )
 
+        eval_data = data.get("evaluation", {}) or {}
+        evaluation = EvaluationConfig(
+            inner_dev_from_train=eval_data.get("inner_dev_from_train", False),
+        )
+
         return cls(
             name=data.get("name", "unnamed"),
             model=model,
             train_datasets=train_datasets,
             test_datasets=test_datasets,
+            evaluation=evaluation,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,6 +153,9 @@ class ExperimentConfig:
             "test": {
                 name: {"enabled": cfg.enabled, "max_samples": cfg.max_samples}
                 for name, cfg in self.test_datasets.items()
+            },
+            "evaluation": {
+                "inner_dev_from_train": self.evaluation.inner_dev_from_train,
             },
         }
 
@@ -228,6 +249,13 @@ class ExperimentConfig:
             limit = f" (max {cfg.max_samples})" if cfg.max_samples else ""
             lines.append(f"  {status} {cfg.name}{limit}")
 
+        lines.append("")
+        lines.append("Evaluation:")
+        lines.append(
+            f"  inner_dev_from_train: {self.evaluation.inner_dev_from_train} "
+            "(if True, dev split is carved from train by unique text)"
+        )
+
         return "\n".join(lines)
 
 
@@ -244,4 +272,5 @@ def create_default_config() -> ExperimentConfig:
             "admed_anoni": DatasetConfig(name="admed_anoni", enabled=True),
             "admed_human": DatasetConfig(name="admed_human", enabled=True),
         },
+        evaluation=EvaluationConfig(),
     )

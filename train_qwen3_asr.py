@@ -57,7 +57,7 @@ from typing import Any, Dict, List, Union
 import evaluate
 import numpy as np
 import torch
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 from qwen_asr import Qwen3ASRModel
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
@@ -144,11 +144,25 @@ Qwen3ASRTextConfig.standardize_rope_params = _standardize_rope_params
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from data.experiment_config import ExperimentConfig
+from data.training_dataset import (
+    compute_training_cache_fingerprint,
+    load_or_build_processed_dataset,
+    resolve_processed_data_path,
+)
+
 PROCESSED_DATA_DIR = os.environ.get(
     "PROCESSED_DATA_DIR", "/mnt/data/Eskulap-a/processed_data"
 )
-PROCESSED_DATA_PATH = os.path.join(
-    PROCESSED_DATA_DIR, f"processed_data_{BASE_MODEL_NAME.split('/')[-1]}"
+_experiment_cfg = ExperimentConfig.from_yaml(CONFIG_PATH)
+_training_cache_fp = compute_training_cache_fingerprint(
+    config_path=CONFIG_PATH,
+    model_family="qwen3-asr",
+    base_model_name=BASE_MODEL_NAME,
+    inner_dev_from_train=_experiment_cfg.evaluation.inner_dev_from_train,
+)
+PROCESSED_DATA_PATH = resolve_processed_data_path(
+    PROCESSED_DATA_DIR, BASE_MODEL_NAME.split("/")[-1], _training_cache_fp
 )
 
 # =============================================================================
@@ -204,70 +218,52 @@ def prepare_single(example):
     }
 
 
-def process_split(split_dataset, desc="Processing"):
-    """Process a dataset split using a simple loop (avoids dataset.map hang)."""
-    from datasets import Dataset, concatenate_datasets
-    from tqdm import tqdm
-
-    # Process in chunks to avoid PyArrow overflow with large audio features
-    chunk_size = 500
-    chunks = []
-
-    pbar = tqdm(total=len(split_dataset), desc=desc)
-    for start in range(0, len(split_dataset), chunk_size):
-        end = min(start + chunk_size, len(split_dataset))
-        results = []
-        for i in range(start, end):
-            example = split_dataset[i]
-            results.append(prepare_single(example))
-        chunk = Dataset.from_dict(
-            {k: [r[k] for r in results] for k in results[0].keys()}
-        )
-        chunks.append(chunk)
-    pbar.close()
-
-    return concatenate_datasets(chunks)
-
-
 # Import the new data loading API
 from data import load_test_data, load_train_data
 
-# Load or process dataset
-if os.path.exists(PROCESSED_DATA_PATH):
-    print(f"Loading cached dataset from {PROCESSED_DATA_PATH}")
-    dataset = load_from_disk(PROCESSED_DATA_PATH)
-    if "prompt_length" not in dataset["train"].column_names:
-        import shutil
+print(f"Loading data from config: {CONFIG_PATH}")
+raw_train = load_train_data(config_path=CONFIG_PATH)
+print(f"Raw train: {len(raw_train)} samples")
 
-        shutil.rmtree(PROCESSED_DATA_PATH)
-        dataset = None
-
-if not os.path.exists(PROCESSED_DATA_PATH):
-    print(f"Loading data from config: {CONFIG_PATH}")
-    # Load training and test data using config
-    raw_train = load_train_data(config_path=CONFIG_PATH)
+inner_dev = _experiment_cfg.evaluation.inner_dev_from_train
+raw_test_dict = None
+if not inner_dev:
     raw_test_dict = load_test_data(config_path=CONFIG_PATH)
-    # Concatenate test datasets
-    from datasets import concatenate_datasets
+    if not raw_test_dict:
+        print(
+            "Warning: no enabled test datasets in config; "
+            "falling back to inner_dev_from_train split."
+        )
+        inner_dev = True
 
+if inner_dev:
+    all_texts = raw_train["text"]
+    unique_texts = list(set(all_texts))
+    random.seed(42)
+    random.shuffle(unique_texts)
+    dev_text_count = max(1, min(500, len(unique_texts) // 10))
+    dev_texts = set(unique_texts[:dev_text_count])
+    dev_indices = [i for i, t in enumerate(all_texts) if t in dev_texts]
+    train_indices = [i for i, t in enumerate(all_texts) if t not in dev_texts]
+    raw_splits = DatasetDict({
+        "train": raw_train.select(train_indices),
+        "test": raw_train.select(dev_indices),
+    })
+else:
     raw_test = concatenate_datasets(list(raw_test_dict.values()))
-    print(f"Raw: {len(raw_train)} train, {len(raw_test)} test")
+    print(f"Raw test (held-out from config): {len(raw_test)} samples")
+    raw_splits = DatasetDict({"train": raw_train, "test": raw_test})
 
-    # Create a DatasetDict for processing
-    from datasets import DatasetDict as RawDatasetDict
-
-    raw_dataset = RawDatasetDict({"train": raw_train, "test": raw_test})
-
-    # Process using simple loop (dataset.map hangs with this processor)
-    from datasets import DatasetDict
-
-    dataset = DatasetDict(
-        {
-            "train": process_split(raw_dataset["train"], "Processing train"),
-            "test": process_split(raw_dataset["test"], "Processing test"),
-        }
-    )
-    dataset.save_to_disk(PROCESSED_DATA_PATH)
+# Chunked loop avoids dataset.map hangs with this processor
+dataset = load_or_build_processed_dataset(
+    processed_data_path=PROCESSED_DATA_PATH,
+    raw_splits=raw_splits,
+    backend="chunked_loop",
+    prepare_single=prepare_single,
+    chunked_size=500,
+    required_cache_columns=["prompt_length"],
+)
+print(f"Processed dataset at {PROCESSED_DATA_PATH}")
 
 # Filter long samples and create eval subset
 initial = len(dataset["train"])

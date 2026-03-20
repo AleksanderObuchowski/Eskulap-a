@@ -1,6 +1,6 @@
 # Whisper + Bielik LLM Rescoring
 
-This repository now includes `whisper_llm_rescore_demo.py`, a minimal n-best rescoring pipeline for ASR.
+This repository includes `eval/llm_rescore.py`, a minimal n-best rescoring pipeline for ASR (`whisper_llm_rescore_demo.py` is a thin CLI wrapper).
 
 ## Method
 
@@ -36,7 +36,7 @@ This is the standard log-linear rescoring idea used in ASR beam search with exte
 ## Quick Run
 
 ```bash
-python whisper_llm_rescore_demo.py \
+python -m eval.llm_rescore \
   --audio-path path/to/audio.wav \
   --num-beams 8 \
   --num-return-sequences 8 \
