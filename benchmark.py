@@ -34,7 +34,12 @@ import torch
 from datasets import Dataset
 from huggingface_hub import HfApi, hf_hub_download
 from tqdm import tqdm
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from transformers import (
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 
 from whisper_llm_rescore_demo import (
     build_hypotheses,
@@ -56,6 +61,9 @@ DEFAULT_MODEL_TYPE = "qwen3"
 # Whisper models
 WHISPER_MODEL_NAME = "AleksanderObuchowski/whisper-large-v3-turbo-med-pl-lora"
 WHISPER_BASE_MODEL = "openai/whisper-large-v3-turbo"
+
+# Cohere Transcribe models
+COHERE_MODEL_NAME = "CohereLabs/cohere-transcribe-03-2026"
 
 # Qwen3-ASR models
 QWEN3_BASE_MODEL = "Qwen/Qwen3-ASR-1.7B"
@@ -113,7 +121,7 @@ def resolve_model_config(
         else:
             # It's a base or fine-tuned model - use directly, no LoRA
             return model_path, None
-    else:
+    elif model_type == "whisper":
         # Whisper
         if model_path is None:
             return WHISPER_MODEL_NAME, None
@@ -123,6 +131,17 @@ def resolve_model_config(
             return WHISPER_BASE_MODEL, model_path
         else:
             # Base or fine-tuned Whisper
+            return model_path, None
+    else:
+        # Cohere
+        if model_path is None:
+            return COHERE_MODEL_NAME, None
+
+        if is_lora_model(model_path):
+            # Cohere LoRA - use with default base
+            return COHERE_MODEL_NAME, model_path
+        else:
+            # Base or fine-tuned Cohere
             return model_path, None
 
 
@@ -243,6 +262,94 @@ def process_batch_whisper(
 
     transcriptions = processor.batch_decode(predicted_ids, skip_special_tokens=True)
     return transcriptions
+
+
+def process_batch_cohere(
+    model, processor, audio_batch: list[dict], device: str
+) -> list[str]:
+    """Process a batch of audio samples with Cohere Transcribe."""
+    import librosa
+
+    audio_arrays = [item["array"] for item in audio_batch]
+    sampling_rates = [item["sampling_rate"] for item in audio_batch]
+    if hasattr(model, "transcribe"):
+        return model.transcribe(
+            processor=processor,
+            audio_arrays=audio_arrays,
+            sample_rates=sampling_rates,
+            language="pl",
+            batch_size=len(audio_arrays),
+        )
+
+    # Fallback: remote model without transcribe() — mirror modeling_cohere_asr (prompt + resample).
+    target_sr = int(getattr(processor.feature_extractor, "sampling_rate", 16000))
+    waveforms: list[np.ndarray] = []
+    for arr, sr in zip(audio_arrays, sampling_rates):
+        w = np.asarray(arr, dtype=np.float32)
+        if w.ndim > 1:
+            w = w.mean(axis=1)
+        if int(sr) != target_sr:
+            w = librosa.resample(
+                w, orig_sr=int(sr), target_sr=target_sr
+            ).astype(np.float32, copy=False)
+        waveforms.append(w)
+
+    prompt_text = model.build_prompt(language="pl", punctuation=True)
+    if hasattr(model, "_transcribe_waveforms_batched"):
+        return model._transcribe_waveforms_batched(
+            processor,
+            waveforms,
+            [target_sr] * len(waveforms),
+            prompt_text,
+            len(waveforms),
+            256,
+            False,
+        )
+
+    prompts = [prompt_text] * len(waveforms)
+    inputs = processor(
+        audio=waveforms,
+        text=prompts,
+        sampling_rate=target_sr,
+        return_tensors="pt",
+    )
+    if "input_ids" in inputs and "decoder_input_ids" not in inputs:
+        inputs["decoder_input_ids"] = inputs.pop("input_ids")
+    pad_id = processor.tokenizer.pad_token_id
+    if "decoder_input_ids" in inputs and "decoder_attention_mask" not in inputs:
+        if pad_id is None:
+            inputs["decoder_attention_mask"] = torch.ones(
+                inputs["decoder_input_ids"].shape,
+                dtype=torch.long,
+                device=inputs["decoder_input_ids"].device,
+            )
+        else:
+            inputs["decoder_attention_mask"] = (
+                inputs["decoder_input_ids"].ne(pad_id).long()
+            )
+    inputs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, "to")}
+    with torch.inference_mode():
+        gen = model.generate(
+            **inputs,
+            max_new_tokens=256,
+            do_sample=False,
+            num_beams=1,
+            decoder_start_token_id=int(inputs["decoder_input_ids"][0, 0].item()),
+            use_cache=True,
+        )
+    prompt_lens = inputs["decoder_attention_mask"].sum(dim=1).tolist()
+    eos_id = processor.tokenizer.eos_token_id
+    trimmed = []
+    for row, pl in zip(gen.cpu().tolist(), prompt_lens):
+        row = row[pl:]
+        if eos_id is not None:
+            try:
+                row = row[: row.index(eos_id)]
+            except ValueError:
+                pass
+        trimmed.append(row)
+    texts = processor.tokenizer.batch_decode(trimmed, skip_special_tokens=True)
+    return [t.strip() for t in texts]
 
 
 def _whisper_nbest_simple(
@@ -423,7 +530,7 @@ def evaluate_test_set(
             except Exception as e:
                 print(f"Error on sample {i}: {e}")
                 predictions.append("")
-    elif use_rescore:
+    elif model_type == "whisper" and use_rescore:
         for i in tqdm(range(len(dataset)), desc=f"  {dataset_name} (rescore)", leave=False):
             item = dataset[i]
             references.append(item["text"])
@@ -449,9 +556,14 @@ def evaluate_test_set(
             batch_references = [item["text"] for item in batch_items]
 
             try:
-                batch_predictions = process_batch_whisper(
-                    model, processor, audio_batch, DEVICE
-                )
+                if model_type == "whisper":
+                    batch_predictions = process_batch_whisper(
+                        model, processor, audio_batch, DEVICE
+                    )
+                else:
+                    batch_predictions = process_batch_cohere(
+                        model, processor, audio_batch, DEVICE
+                    )
                 predictions.extend([p.strip() for p in batch_predictions])
                 references.extend(batch_references)
             except Exception as e:
@@ -526,7 +638,7 @@ class MultiTestBenchmark:
                     Path(lora_path).name if Path(lora_path).exists() else lora_path
                 )
                 self.model_name += f"+{lora_name}"
-        else:
+        elif self.model_type == "whisper":
             if lora_path:
                 # Whisper with LoRA
                 from peft import PeftModel
@@ -544,6 +656,31 @@ class MultiTestBenchmark:
                 WHISPER_BASE_MODEL, language="Polish", task="transcribe"
             )
             self.model.to(DEVICE)
+            self.model.eval()
+        else:
+            if lora_path:
+                from peft import PeftModel
+
+                base = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    base_model,
+                    trust_remote_code=True,
+                )
+                self.model = PeftModel.from_pretrained(base, lora_path)
+                self.model = self.model.merge_and_unload()
+                self.model_name = f"{base_model}+{Path(lora_path).name}"
+            else:
+                self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    base_model,
+                    trust_remote_code=True,
+                )
+                self.model_name = base_model
+
+            self.processor = AutoProcessor.from_pretrained(
+                base_model,
+                trust_remote_code=True,
+            )
+            self.model.to(DEVICE)
+            self.model.eval()
 
     def load_lm(self):
         """Load the LM for rescoring."""
@@ -731,7 +868,7 @@ def main():
     )
     parser.add_argument(
         "--model-type",
-        choices=["whisper", "qwen3"],
+        choices=["whisper", "qwen3", "cohere"],
         default=DEFAULT_MODEL_TYPE,
         help="Model type to use",
     )
